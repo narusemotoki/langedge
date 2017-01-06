@@ -6,6 +6,7 @@ from typing import (
     Any,
     BinaryIO,
     Dict,
+    List,
     Type,
     TypeVar,
     Union,
@@ -97,7 +98,7 @@ class Stat(Model):
         )
 
 
-class Order(Model):
+class OrderResult(Model):
     def __init__(  # type: ignore
             self,
             *,
@@ -113,14 +114,143 @@ class Order(Model):
 
     @classmethod
     def from_response(
-            cls: Type['Order'], response: Union[http.client.HTTPResponse, BinaryIO]) -> 'Order':
+            cls: Type['OrderResult'], response: Union[http.client.HTTPResponse, BinaryIO]
+    ) -> 'OrderResult':
         data = _read_response_as_json(response)
         currency = langedge.models.Currency[data.pop('currency')]  # type: ignore
 
         return cls(currency=currency, **data)
 
 
+class Order(Model):
+    def __init__(
+            self,
+            *,
+            order_id: int,
+            total_credits: float,
+            total_units: int,
+            currency: langedge.models.Currency,  # type: ignore
+            jobs_available: List[int],
+            jobs_pending: List[int],
+            jobs_reviewable: List[int],
+            jobs_approved: List[int],
+            jobs_revising: List[int],
+            jobs_queued: int,
+            total_jobs: int
+    ) -> None:
+        self.order_id = order_id
+        self.total_credits = total_credits
+        self.total_units = total_units
+        self.total_jobs = total_jobs
+        self.currency = currency  # type: ignore
+        self.jobs_available = jobs_available
+        self.jobs_pending = jobs_pending
+        self.jobs_reviewable = jobs_reviewable
+        self.jobs_approved = jobs_approved
+        self.jobs_revising = jobs_revising
+        self.jobs_queued = jobs_queued
+
+    @classmethod
+    def from_response(
+            cls: Type['Order'], response: Union[http.client.HTTPResponse, BinaryIO]
+    ) -> 'Order':
+        data = _read_response_as_json(response)['order']
+        # This API returns everything as str.
+        return cls(
+            order_id=int(data['order_id']),
+            total_credits=float(data['total_credits']),
+            currency=langedge.models.Currency[data['currency']],  # type: ignore
+            jobs_available=[int(i) for i in data['jobs_available']],
+            jobs_pending=[int(i) for i in data['jobs_pending']],
+            jobs_reviewable=[int(i) for i in data['jobs_reviewable']],
+            jobs_approved=[int(i) for i in data['jobs_approved']],
+            jobs_revising=[int(i) for i in data['jobs_revising']],
+            total_jobs=int(data.pop('total_jobs')),
+            jobs_queued=int(data.pop('jobs_queued')),
+            total_units=int(data.pop('total_units'))
+        )
+
+
+class Job(Model):
+    def __init__(  # type: ignore
+            self,
+            *,
+            job_id: int,
+            credits: float,
+            eta: int,
+            order_id: int,
+            currency: langedge.models.Currency,  # type: ignore
+            ctime: datetime.datetime,
+            status: langedge.models.JobStatus,
+            slug: str,
+            body_src: str,
+            lc_src: langedge.models.LanguageCode,  # type: ignore
+            lc_tgt: langedge.models.LanguageCode,  # type: ignore
+            tier: langedge.models.Tier,  # type: ignore
+            auto_approve: bool,
+            callback_url: str,
+            unit_count: int,
+            position: int,
+            body_tgt: str=None,
+            custom_data: str=None
+    ) -> None:
+        self.job_id = job_id
+        self.credits = credits
+        self.eta = eta
+        self.order_id = order_id
+        self.currency = currency  # type: ignore
+        self.ctime = ctime
+        self.status = status  # type: ignore
+        self.slug = slug
+        self.body_src = body_src
+        self.body_tgt = body_tgt
+        self.lc_src = lc_src  # type: ignore
+        self.lc_tgt = lc_tgt  # type: ignore
+        self.tier = tier  # type: ignore
+        self.callback_url = callback_url
+        self.custom_data = custom_data
+        self.auto_approve = auto_approve
+        self.unit_count = unit_count
+        self.position = position
+
+    @classmethod
+    def from_response(
+            cls: Type['Job'], response: Union[http.client.HTTPResponse, BinaryIO]
+    ) -> 'Job':
+        ...
+
+
+class _Jobs(Model):
+    """This class is just for typing.
+
+    User of this library usually don't need to touch this one.
+    """
+    def __init__(self, jobs: List[Job]) -> None:
+        self.jobs = jobs
+
+    @classmethod
+    def _from_response(cls: Type['_Jobs'], source: Dict[str, Any]) -> Job:
+        """
+
+        This method will break argument dict.
+        """
+        return Job(
+            currency=langedge.models.Currency[source.pop('currency')],  # type: ignore
+            lc_src=langedge.models.LanguageCode[source.pop('lc_src')],  # type: ignore
+            lc_tgt=langedge.models.LanguageCode[source.pop('lc_tgt')],  # type: ignore
+            tier=langedge.models.Tier[source.pop('tier')],  # type: ignore
+            status=langedge.models.JobStatus[source.pop('status')],  # type: ignore
+            auto_approve=bool(source.pop('auto_approve')),
+            ctime=datetime.datetime.fromtimestamp(source.pop('ctime')),
+            **source
+        )
+
+    @classmethod
+    def from_response(
+            cls: Type['_Jobs'], response: Union[http.client.HTTPResponse, BinaryIO]
+    ) -> '_Jobs':
+        return cls([cls._from_response(job) for job in _read_response_as_json(response)['jobs']])
+
+
 def _read_response_as_json(response: Union[http.client.HTTPResponse, BinaryIO]) -> Dict[str, Any]:
-    raw = response.read().decode()
-    print(raw)
-    return json.loads(raw)['response']
+    return json.loads(response.read().decode())['response']

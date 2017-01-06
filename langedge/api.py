@@ -1,12 +1,10 @@
 import abc
 import asyncio
 import enum
-import functools
 import json
 from typing import (
     Any,
     Awaitable,
-    Callable,
     Dict,
     Iterable,
     List,
@@ -36,12 +34,22 @@ class LoopContext:
         self.loop.close()
 
 
-def async_wait(func: Callable[..., T]) -> Callable[..., T]:
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs) -> T:
-        with LoopContext() as loop:
-            return loop.run_until_complete(asyncio.Task(func(*args, **kwargs)))  # type: ignore
-    return wrapper
+def _atask(awaitable: Awaitable[Any]) -> Any:
+    # I can write this function as decorator something like this:
+    # def _atask(func: Callable[..., T]) -> Callable[..., T]:
+    #     @functools.wraps(func)
+    #     def wrapper(*args, **kwargs) -> T:
+    #         with LoopContext() as loop:
+    #             return loop.run_until_complete(
+    #                  asyncio.Task(func(*args, **kwargs)))  # type: ignore
+    #     return wrapper
+    #
+    # However inspect.getfullargspec cannot show argument information well with decorator.
+    # One of a target of this library is any user can use this one without knowledge. Argument
+    # information is an important things for that. When I solve the problem, I will make this one
+    # as decorator.
+    with LoopContext() as loop:
+        return loop.run_until_complete(asyncio.Task(awaitable))  # type: ignore
 
 
 class EnumEncoder(json.JSONEncoder):
@@ -87,28 +95,27 @@ class API(metaclass=abc.ABCMeta):
         else:
             encoded_data = None
 
-        print("req")
         with urllib.request.urlopen(
                 urllib.request.Request(url, headers=headers, method=method),
                 data=encoded_data
         ) as response:
             return model.from_response(response)
 
-    async def _get(
+    def _get(
             self,
             model: Type[langedge.models.response.T],
             path: str,
             params: Dict[str, Any]={}
     ) -> Awaitable[langedge.models.response.T]:
-        return await self._request('GET', model, path, params)
+        return self._request('GET', model, path, params)
 
-    async def _post(
+    def _post(
             self,
             model: Type[langedge.models.response.T],
             path: str,
             data: str,
-    ) -> langedge.models.response.T:
-        return await self._request('POST', model, path, data=data)
+    ) -> Awaitable[langedge.models.response.T]:
+        return self._request('POST', model, path, data=data)
 
 
 class Account(API):
@@ -116,17 +123,14 @@ class Account(API):
     def path(self) -> str:
         return "account"
 
-    @async_wait
     def get_my_account(self) -> Awaitable[Awaitable[langedge.models.response.Account]]:
-        return self._get(langedge.models.response.Account, "me")
+        return _atask(self._get(langedge.models.response.Account, "me"))
 
-    @async_wait
     def get_balance(self) -> Awaitable[Awaitable[langedge.models.response.Balance]]:
-        return self._get(langedge.models.response.Balance, "balance")
+        return _atask(self._get(langedge.models.response.Balance, "balance"))
 
-    @async_wait
     def get_stats(self) -> Awaitable[Awaitable[langedge.models.response.Stat]]:
-        return self._get(langedge.models.response.Stat, "stats")
+        return _atask(self._get(langedge.models.response.Stat, "stats"))
 
 
 class Dummy:
@@ -142,8 +146,9 @@ class Job(API):
 
     def _order(
         self, jobs: Iterable[langedge.models.request.Job]
-    ) -> Awaitable[langedge.models.response.Order]:
-        return self._post(langedge.models.response.Order, "jobs", data=dump_json(
+    ) -> Awaitable[langedge.models.response.OrderResult]:
+        print(jobs)
+        return self._post(langedge.models.response.OrderResult, "jobs", data=dump_json(
             {
                 'jobs': {
                     'job_{}'.format(i): job.to_dict() for i, job in enumerate(jobs)
@@ -151,33 +156,55 @@ class Job(API):
             }
         ))
 
-    @async_wait
     def order(
             self, jobs: Iterable[langedge.models.request.Job]
     ) -> Awaitable[langedge.models.response.Order]:
-        return self._order(jobs)
+        return _atask(self._order(jobs))
 
-    @async_wait
-    def bulk_order(
+    def batch_order(
             self,
             jobs: Iterable[langedge.models.request.Job],
             max_chunk_size=50
     ) -> List[langedge.models.response.Order]:
-        chunks = []
-        chunk = []
-        previous_qualification = (None, None, None)
-        for job in jobs:
-            qualification = (job.lc_src, job.lc_tgt, job.tier)
-            if qualification != previous_qualification or len(chunk) == max_chunk_size:
-                previous_qualification = qualification
-                if chunk:
-                    chunks.append(chunk)
-                chunk = []
-            chunk.append(job)
-        if chunk:
-            chunks.append(chunk)
+        def _batch_order():
+            chunks = []
+            chunk = []
+            previous_qualification = (None, None, None)
+            for job in jobs:
+                qualification = (job.lc_src, job.lc_tgt, job.tier)
+                if qualification != previous_qualification or len(chunk) == max_chunk_size:
+                    previous_qualification = qualification
+                    if chunk:
+                        chunks.append(chunk)
+                    chunk = []
+                chunk.append(job)
+            if chunk:
+                chunks.append(chunk)
 
-        return [
-            (yield from f) for f in asyncio.as_completed(
-                [self._order(jobs) for jobs in chunks])
-        ]
+            return [
+                (yield from f) for f in asyncio.as_completed(
+                    [self._order(jobs) for jobs in chunks])
+            ]
+
+        return _atask(_batch_order())
+
+    def _list_order_jobs(self, order_id: int) -> Awaitable[langedge.models.response.Order]:
+        return self._get(langedge.models.response.Order, "order/{}".format(order_id))
+
+    def list_order_jobs(self, order_id: int) -> Awaitable[langedge.models.response.Order]:
+        return _atask(self._list_order_jobs(order_id))
+
+    def batch_list_order_jobs(
+            self, order_ids: Iterable[int]) -> List[langedge.models.response.Order]:
+        def _batch_list_order_jobs():
+            return [
+                (yield from f) for f in asyncio.as_completed(
+                    [self._list_order_jobs(order_id) for order_id in order_ids])
+            ]
+        return _atask(_batch_list_order_jobs())
+
+    def list_jobs(self, job_ids: Iterable[int]) -> List[langedge.models.response.Job]:
+        return _atask(self._get(
+            langedge.models.response._Jobs,
+            "jobs/{}".format(','.join([str(job_id) for job_id in job_ids]))
+        )).jobs
